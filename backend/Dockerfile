@@ -7,10 +7,9 @@ RUN apt-get update && apt-get install -y \
     netcat-traditional \
     postgresql-client \
     curl \
-    && rm -rf /var/lib/apt/lists/*
-    build-essential \
+        build-essential \
     python3-dev \
-        git \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
