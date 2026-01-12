@@ -1,82 +1,117 @@
-version: '3.8'
-
 services:
+  # MySQL Database
   mysql:
     image: mysql:8.0
+    container_name: jyotish_mysql
     environment:
-      MYSQL_ROOT_PASSWORD: rootpass
-      MYSQL_DATABASE: astroos
-      MYSQL_USER: astro
-      MYSQL_PASSWORD: astropass
-    ports:
-      - "3306:3306"
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
     volumes:
       - mysql_data:/var/lib/mysql
+    ports:
+      - "3306:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
       interval: 10s
-      timeout: 5s
-      retries: 5
+    networks:
+      - jyotish_network
 
+  # Redis Cache & Message Broker
   redis:
     image: redis:7-alpine
+    container_name: jyotish_redis
     ports:
       - "6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
+      timeout: 3s
       retries: 5
+      interval: 5s
+    networks:
+      - jyotish_network
 
+  # Backend API (FastAPI)
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    ports:
-      - "8001:8001"
-    environment:
-      DATABASE_URL: mysql+pymysql://astro:astropass@mysql:3306/astroos
-      REDIS_URL: redis://redis:6379/0
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-dummy_key}
-      SECRET_KEY: dev-secret-key-change-in-production
+    container_name: jyotish_backend
+    command: >
+      sh -c "
+      echo 'Waiting for MySQL...' &&
+      while ! nc -z mysql 3306; do sleep 1; done &&
+      echo 'Waiting for Redis...' &&
+      while ! nc -z redis 6379; do sleep 1; done &&
+      echo 'Running migrations...' &&
+      alembic upgrade head &&
+      echo 'Starting FastAPI...' &&
+      uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+      "
+    env_file:
+      - .env
     volumes:
       - ./backend:/app
-      - /mnt/data:/mnt/data:ro
+    ports:
+      - "8001:8001"
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: sh -c "sleep 10 && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload"
+    networks:
+      - jyotish_network
+    restart: unless-stopped
 
+  # Celery Worker
   celery:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    environment:
-      DATABASE_URL: mysql+pymysql://astro:astropass@mysql:3306/astroos
-      REDIS_URL: redis://redis:6379/0
-      OPENAI_API_KEY: ${OPENAI_API_KEY}
-      SECRET_KEY: dev-secret-key-change-in-production
+    container_name: jyotish_celery
+    command: >
+      sh -c "
+      echo 'Waiting for Redis...' &&
+      while ! nc -z redis 6379; do sleep 1; done &&
+      echo 'Starting Celery...' &&
+      celery -A app.celery_app worker --loglevel=info
+      "
+    env_file:
+      - .env
     volumes:
       - ./backend:/app
-      - /mnt/data:/mnt/data:ro
     depends_on:
       - redis
-      - mysql
-    command: celery -A app.workers.celery_app worker --loglevel=info
+      - backend
+    networks:
+      - jyotish_network
+    restart: unless-stopped
 
+  # Frontend (React + Vite)
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      REACT_APP_BACKEND_URL: http://localhost:8080
+    container_name: jyotish_frontend
+    env_file:
+      - .env
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - jyotish_network
+    restart: unless-stopped
 
 volumes:
   mysql_data:
+
+networks:
+  jyotish_network:
+    driver: bridge
